@@ -14,11 +14,16 @@ from organizations.models import Organization
 from appeals.models import Appeal
 import random
 import os
+import re
+from transliterate.decorators import transliterate_function
+import requests
+from bs4 import BeautifulSoup
 
 YANDEX_API_KEY = '815e5f3d-fab8-486b-924f-384c8bf11394'
 API_TOKEN = settings.BOT_TOKEN
 PROXY_HOST = '80.187.140.26'
 PROXY_PORT = '8080'
+AVITO_URL = 'https://www.avito.ru/'
 
 # logger = telebot.logger
 # telebot.logger.setLevel(logging.INFO)
@@ -40,6 +45,7 @@ stub_problems = {
     ],
     '2': [
         'поменять розетку',
+        'установить розетку',
         'поменять люстру',
         'замена счетчика воды',
         'прорыв трубы',
@@ -50,6 +56,11 @@ stub_problems = {
 def delete_file(file_path: str):
     if os.path.exists(file_path):
         os.remove(file_path)
+
+
+@transliterate_function(language_code='ru', reversed=True)
+def to_translit(text):
+    return text
 
 
 @bot.message_handler(commands=['help', 'start'])
@@ -189,7 +200,8 @@ def echo_message(message):
                 employees = Employee.objects.filter(tg_role=2, position_id=employee_role)
                 for employee in employees:
                     markup = types.InlineKeyboardMarkup()
-                    subscribe_btn = types.InlineKeyboardButton('Принять в работу', callback_data='appeal_' + str(new_appeal.id))
+                    subscribe_btn = types.InlineKeyboardButton('Принять в работу',
+                                                               callback_data='appeal_' + str(new_appeal.id))
                     cancel_bt = types.InlineKeyboardButton('Отклонить', callback_data=-1)
                     markup.add(subscribe_btn, cancel_bt)
                     # markup.add(cancel_bt)
@@ -197,6 +209,35 @@ def echo_message(message):
                     text += f'\n\nАдрес: {citizen.address}'
                     bot.send_message(employee.external_id, text, reply_markup=markup)
                     bot.register_next_step_handler(message, subscription)
+
+                # Парсинг объявлений с сервиса Avito с помощью пакета beautifulsoup4
+                # Из поля адреса человека будет выбираться город. Имя города переводится в транслит.
+                # Отправляется запрос на https://www.avito.ru/volgodonsk?q=[Текст запроса]
+                # Пробелы в тексте запроса меняются на символы "+",
+                # знаки пунктуации удаляются (  TODO ПОДУМАТЬ!!! союзы и предлоги оставлять ли в запросе?)
+                # city = to_translit('Волгодонск').lower() -> volgodonsk
+                # query = re.sub(r'\s+', '+', re.sub(r'[^\w\s]', 'Приветы, вам великие боты!', )).lower() -> приветы+вам+великие+боты
+
+                city = to_translit(citizen.address.split(', ')[2]).lower()
+                query = re.sub(r'\s+', '+', re.sub(r'[^\w\s]', '', message.text)).lower()
+                response = requests.get(f'{AVITO_URL}{city}', params={'q': query})
+                b_soup = BeautifulSoup(response.text, 'html.parser')
+                div_list = b_soup.select('div.item')
+                for item in div_list[:6][::-1]:
+                    link = item.select_one('a.snippet-link')
+                    price = item.select_one('span.snippet-price')
+                    description = item.select_one('div.snippet-text')
+                    announcement_text = f'{link.text}\n{AVITO_URL}{link.get("href")}'
+                    if price:
+                        announcement_text += f'\n{price.text}'
+                    if description:
+                        announcement_text += f'\n{description.text}'
+                    bot.send_message(message.chat.id, announcement_text)
+                link_markup = types.InlineKeyboardMarkup()
+                another_announcement_url = f'{AVITO_URL}{city}?q={query}#{div_list[6].get("id")}'
+                another_btn = types.InlineKeyboardButton('Просмотреть', url=another_announcement_url)
+                link_markup.add(another_btn)
+                bot.send_message(message.chat.id, 'Ещё объявления по данной теме', reply_markup=link_markup)
             else:
                 bot.send_message(
                     message.chat.id,
@@ -250,8 +291,9 @@ def finish_subscription(message):
         appeal_subscription = Subscription.objects.get(pk=subscription_id)
         employee = Employee.objects.get(external_id=message.chat.id)
 
-        # TODO Выстроить маршрут используя Яндекс API, с помощью модуля request построить маршрут и вернуть время
-        #   передвижения travel_time. Сейчас используется заглушка, т.к. ограниченное время отведено на реализацию
+        # TODO Выстроить маршрут, используя Яндекс API.
+        #  С помощью модуля request построить маршрут(route) и вернуть время передвижения travel_time.
+        #  Сейчас используется заглушка, т.к. ограниченное время отведено на реализацию
         print(Decimal(message.location.longitude), Decimal(message.location.latitude))
 
         emp_markup = types.InlineKeyboardMarkup()
